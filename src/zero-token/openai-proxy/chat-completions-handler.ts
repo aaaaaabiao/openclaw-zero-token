@@ -4,17 +4,25 @@
  * Receives standard OpenAI chat completion requests, resolves credentials,
  * creates a StreamFn via the existing web-stream-factories, and converts
  * the pi-ai event stream back into OpenAI format.
+ *
+ * Session reuse:
+ *   - StreamFn instances are cached per provider (so the underlying web client
+ *     and its module-level sessionMap/parentMessageMap are preserved).
+ *   - A stable `sessionId` is derived from the `user` field or a custom
+ *     `x-session-id` header. When neither is provided, a default session
+ *     per provider is used, enabling multi-turn conversations out of the box.
+ *   - Send `x-session-id: new` to force a fresh session.
  */
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getWebStreamFactory, listWebStreamApiIds } from "../streams/web-stream-factories.js";
-import { resolveCredentialForProvider } from "./credential-resolver.js";
+import { listWebStreamApiIds } from "../streams/web-stream-factories.js";
 import {
   convertOpenAiMessagesToPiContext,
   type OpenAiMessage,
   type OpenAiTool,
   type PiModel,
 } from "./message-converter.js";
+import { getCachedStreamFn } from "./stream-cache.js";
 import { sendJson, streamToOpenAiResponse, streamToOpenAiSse } from "./stream-converter.js";
 
 interface ChatCompletionRequest {
@@ -55,6 +63,34 @@ function parseModelString(model: string): { provider: string; modelId: string } 
   return undefined;
 }
 
+/**
+ * Resolve the session ID for the request.
+ *
+ * Priority:
+ *   1. `x-session-id` header (explicit session control)
+ *      - "new" → generate a fresh UUID (force new session)
+ *      - any other value → use as-is
+ *   2. `user` field in request body
+ *   3. Default: "proxy-default" (stable, enables multi-turn by default)
+ */
+function resolveSessionId(req: IncomingMessage, body: ChatCompletionRequest): string {
+  const headerValue =
+    typeof req.headers["x-session-id"] === "string" ? req.headers["x-session-id"].trim() : "";
+
+  if (headerValue) {
+    if (headerValue.toLowerCase() === "new") {
+      return `proxy-${randomUUID()}`;
+    }
+    return headerValue;
+  }
+
+  if (body.user) {
+    return body.user;
+  }
+
+  return "proxy-default";
+}
+
 export async function handleChatCompletions(
   req: IncomingMessage,
   res: ServerResponse,
@@ -75,51 +111,51 @@ export async function handleChatCompletions(
     return;
   }
 
-  // 2. Get stream factory
-  const factory = getWebStreamFactory(parsed.provider);
-  if (!factory) {
+  // 2. Get cached StreamFn (reuses web client + session state)
+  const cached = getCachedStreamFn(parsed.provider);
+  if (!cached) {
+    // Distinguish between "unsupported provider" and "no credentials"
     const apis = listWebStreamApiIds();
-    sendJson(res, 400, {
-      error: {
-        message: `Unsupported provider "${parsed.provider}". Available: ${apis.join(", ")}`,
-        type: "invalid_request_error",
-      },
-    });
+    const isKnown = apis.includes(parsed.provider as never);
+    if (!isKnown) {
+      sendJson(res, 400, {
+        error: {
+          message: `Unsupported provider "${parsed.provider}". Available: ${apis.join(", ")}`,
+          type: "invalid_request_error",
+        },
+      });
+    } else {
+      sendJson(res, 401, {
+        error: {
+          message: `No credentials found for provider "${parsed.provider}". Run "./onboard.sh webauth" to configure.`,
+          type: "authentication_error",
+        },
+      });
+    }
     return;
   }
 
-  // 3. Resolve credentials
-  const cred = resolveCredentialForProvider(parsed.provider);
-  if (!cred) {
-    sendJson(res, 401, {
-      error: {
-        message: `No credentials found for provider "${parsed.provider}". Run "./onboard.sh webauth" to configure.`,
-        type: "authentication_error",
-      },
-    });
-    return;
-  }
-
-  // 4. Create StreamFn
-  const streamFn = factory(cred.credential);
-
-  // 5. Build pi-ai model and context
+  // 3. Build pi-ai model and context
   const piModel: PiModel = {
     id: parsed.modelId === "default" ? parsed.provider : parsed.modelId,
     provider: parsed.provider,
     api: parsed.provider,
   };
 
-  const sessionId = body.user ?? `proxy-${randomUUID()}`;
+  const sessionId = resolveSessionId(req, body);
   const piContext = convertOpenAiMessagesToPiContext({
     messages: body.messages,
     tools: body.tools,
     sessionId,
   });
 
-  // 6. Call StreamFn — it returns an AsyncIterable<AssistantMessageEvent>
+  console.log(
+    `[openai-proxy] model=${body.model} session=${sessionId} messages=${body.messages.length} stream=${!!body.stream}`,
+  );
+
+  // 4. Call StreamFn — it returns an AsyncIterable<AssistantMessageEvent>
   try {
-    const eventStream = streamFn(
+    const eventStream = cached.streamFn(
       piModel as never,
       piContext as never,
       { signal: undefined } as never,
