@@ -128,6 +128,7 @@ function buildCoreDistEntries(): Record<string, string> {
     "plugins/build-smoke-entry": "src/plugins/build-smoke-entry.ts",
     "plugins/runtime/index": "src/plugins/runtime/index.ts",
     "llm-slug-generator": "src/hooks/llm-slug-generator.ts",
+    "zero-token/openai-proxy/index": "src/zero-token/openai-proxy/index.ts",
   };
 }
 
