@@ -101,6 +101,25 @@ async function handleRequest(
       const raw = await readBody(req);
       const body = JSON.parse(raw);
 
+      // Dump raw request for debugging
+      console.log(
+        `[openai-proxy] ── RAW REQUEST ── model=${body.model} messages=${Array.isArray(body.messages) ? body.messages.length : "N/A"} stream=${body.stream ?? false}`,
+      );
+      if (Array.isArray(body.messages)) {
+        for (let i = 0; i < body.messages.length; i++) {
+          const m = body.messages[i];
+          const cLen =
+            typeof m.content === "string"
+              ? m.content.length
+              : Array.isArray(m.content)
+                ? JSON.stringify(m.content).length
+                : 0;
+          console.log(
+            `[openai-proxy]   raw[${i}] role="${m.role}" content_type=${typeof m.content === "string" ? "string" : Array.isArray(m.content) ? `array[${m.content.length}]` : String(m.content)} len=${cLen}`,
+          );
+        }
+      }
+
       if (!body.model || !Array.isArray(body.messages)) {
         sendJson(res, 400, {
           error: {

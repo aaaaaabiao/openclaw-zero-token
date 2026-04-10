@@ -1,58 +1,16 @@
 /**
- * Message Converter: OpenAI chat messages ↔ pi-ai Context.messages
+ * Message Converter — Direct Passthrough
  *
- * Converts standard OpenAI `/v1/chat/completions` message array into
- * the pi-ai `Context` shape that each `StreamFn` expects.
+ * Converts OpenAI `/v1/chat/completions` messages into the minimal context
+ * shape that each `StreamFn` expects.  Follows the same approach as the
+ * AskOnce DeepSeek adapter: content is passed as plain strings, not wrapped
+ * in ContentPart arrays.
  */
 
-// The pi-ai message types used by StreamFn context
-export type PiRole = "user" | "assistant" | "system" | "toolResult";
-
-export interface PiTextContent {
-  type: "text";
-  text: string;
-}
-
-export interface PiThinkingContent {
-  type: "thinking";
-  thinking: string;
-}
-
-export interface PiToolCallContent {
-  type: "toolCall";
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-export type PiContentPart = PiTextContent | PiThinkingContent | PiToolCallContent;
-
-export interface PiMessage {
-  role: PiRole;
-  content: PiContentPart[] | string;
-  // toolResult specific fields
-  toolCallId?: string;
-  toolName?: string;
-}
-
-export interface PiContext {
-  messages: PiMessage[];
-  systemPrompt?: string;
-  tools?: Array<{ name: string; description: string; parameters?: unknown }>;
-  sessionId?: string;
-}
-
-export interface PiModel {
-  id: string;
-  provider: string;
-  api: string;
-  name?: string;
-}
-
-// ------- OpenAI types -------
+// ------- OpenAI input types -------
 
 export interface OpenAiMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  role: "system" | "developer" | "user" | "assistant" | "tool";
   content?: string | OpenAiContentPart[] | null;
   name?: string;
   tool_calls?: OpenAiToolCall[];
@@ -83,70 +41,71 @@ export interface OpenAiTool {
 // ------- Conversion -------
 
 /**
- * Convert an OpenAI messages array into pi-ai context shape.
+ * Build the minimal context object that StreamFn accepts.
+ *
+ * - `system` messages are merged into a single `systemPrompt` string.
+ * - `user` / `assistant` / `tool` messages are converted to objects with
+ *   string `content`, matching the format downstream web-stream handlers
+ *   already support (see deepseek-web-stream.ts line 124).
  */
-export function convertOpenAiMessagesToPiContext(params: {
+export function buildStreamContext(params: {
   messages: OpenAiMessage[];
   tools?: OpenAiTool[];
   sessionId?: string;
-}): PiContext {
+}): {
+  messages: Array<Record<string, unknown>>;
+  systemPrompt: string;
+  tools: Array<{ name: string; description: string; parameters?: unknown }>;
+  sessionId: string | undefined;
+} {
   const { messages, tools, sessionId } = params;
-  const piMessages: PiMessage[] = [];
-  let systemPrompt = "";
 
-  for (const msg of messages) {
-    if (msg.role === "system") {
-      // Accumulate system messages as system prompt
-      const text = extractTextFromContent(msg.content);
-      systemPrompt += (systemPrompt ? "\n" : "") + text;
+  const TAG = "[msg-converter]";
+  console.log(
+    `${TAG} ── INPUT ── messages=${messages.length} tools=${tools?.length ?? 0} sessionId=${sessionId ?? "(none)"}`,
+  );
+
+  // 1. Extract system prompt
+  const systemParts: string[] = [];
+  const passthrough: Array<Record<string, unknown>> = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    if (msg.role === "system" || msg.role === "developer") {
+      const text = extractText(msg.content);
+      systemParts.push(text);
       continue;
     }
 
     if (msg.role === "user") {
-      const text = extractTextFromContent(msg.content);
-      piMessages.push({ role: "user", content: [{ type: "text", text }] });
+      const text = extractText(msg.content);
+      passthrough.push({ role: "user", content: text });
       continue;
     }
 
     if (msg.role === "assistant") {
-      const parts: PiContentPart[] = [];
-
-      // Text content
-      const text = extractTextFromContent(msg.content);
-      if (text) {
-        parts.push({ type: "text", text });
-      }
-
-      // Tool calls
-      if (msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          let args: Record<string, unknown> = {};
-          try {
-            args = JSON.parse(tc.function.arguments);
-          } catch {
-            args = { raw: tc.function.arguments };
-          }
-          parts.push({
-            type: "toolCall",
-            id: tc.id,
-            name: tc.function.name,
-            arguments: args,
-          });
-        }
-      }
-
-      if (parts.length > 0) {
-        piMessages.push({ role: "assistant", content: parts });
+      const text = extractText(msg.content);
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        const tcText = msg.tool_calls
+          .map(
+            (tc) =>
+              `<tool_call id="${tc.id}" name="${tc.function.name}">${tc.function.arguments}</tool_call>`,
+          )
+          .join("\n");
+        const merged = text ? `${text}\n${tcText}` : tcText;
+        passthrough.push({ role: "assistant", content: merged });
+      } else {
+        passthrough.push({ role: "assistant", content: text });
       }
       continue;
     }
 
     if (msg.role === "tool") {
-      // Tool result message
-      const text = extractTextFromContent(msg.content);
-      piMessages.push({
-        role: "toolResult" as PiRole,
-        content: [{ type: "text", text }],
+      const resultText = extractText(msg.content);
+      passthrough.push({
+        role: "toolResult",
+        content: resultText,
         toolCallId: msg.tool_call_id,
         toolName: msg.name ?? "unknown",
       });
@@ -154,21 +113,25 @@ export function convertOpenAiMessagesToPiContext(params: {
     }
   }
 
-  const piTools = tools?.map((t) => ({
+  // 2. Convert tools
+  const piTools = (tools ?? []).map((t) => ({
     name: t.function.name,
     description: t.function.description ?? "",
     parameters: t.function.parameters,
   }));
 
+  const systemPrompt = systemParts.join("\n");
+
   return {
-    messages: piMessages,
-    systemPrompt: systemPrompt || undefined,
+    messages: passthrough,
+    systemPrompt,
     tools: piTools,
     sessionId,
   };
 }
 
-function extractTextFromContent(content: string | OpenAiContentPart[] | null | undefined): string {
+/** Extract plain text from OpenAI content (string | ContentPart[] | null). */
+function extractText(content: string | OpenAiContentPart[] | null | undefined): string {
   if (!content) {
     return "";
   }

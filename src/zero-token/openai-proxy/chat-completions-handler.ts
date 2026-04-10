@@ -15,14 +15,8 @@
  */
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { listWebStreamApiIds } from "../streams/web-stream-factories.js";
-import {
-  convertOpenAiMessagesToPiContext,
-  type OpenAiMessage,
-  type OpenAiTool,
-  type PiModel,
-} from "./message-converter.js";
-import { getCachedStreamFn } from "./stream-cache.js";
+import { buildStreamContext, type OpenAiMessage, type OpenAiTool } from "./message-converter.js";
+import { getCachedStreamFn, listRawApiIds } from "./stream-cache.js";
 import { sendJson, streamToOpenAiResponse, streamToOpenAiSse } from "./stream-converter.js";
 
 interface ChatCompletionRequest {
@@ -55,7 +49,7 @@ function parseModelString(model: string): { provider: string; modelId: string } 
   }
 
   // If no slash, treat the whole thing as provider and use a default model id
-  const apis = listWebStreamApiIds();
+  const apis = listRawApiIds();
   if (apis.includes(trimmed as never)) {
     return { provider: trimmed, modelId: "default" };
   }
@@ -101,7 +95,7 @@ export async function handleChatCompletions(
   // 1. Parse model
   const parsed = parseModelString(body.model);
   if (!parsed) {
-    const apis = listWebStreamApiIds();
+    const apis = listRawApiIds();
     sendJson(res, 400, {
       error: {
         message: `Invalid model "${body.model}". Use format: "provider/model", e.g. "deepseek-web/deepseek-chat". Available providers: ${apis.join(", ")}`,
@@ -115,7 +109,7 @@ export async function handleChatCompletions(
   const cached = getCachedStreamFn(parsed.provider);
   if (!cached) {
     // Distinguish between "unsupported provider" and "no credentials"
-    const apis = listWebStreamApiIds();
+    const apis = listRawApiIds();
     const isKnown = apis.includes(parsed.provider as never);
     if (!isKnown) {
       sendJson(res, 400, {
@@ -135,15 +129,15 @@ export async function handleChatCompletions(
     return;
   }
 
-  // 3. Build pi-ai model and context
-  const piModel: PiModel = {
+  // 3. Build model & context (direct passthrough, string content)
+  const piModel = {
     id: parsed.modelId === "default" ? parsed.provider : parsed.modelId,
     provider: parsed.provider,
     api: parsed.provider,
   };
 
   const sessionId = resolveSessionId(req, body);
-  const piContext = convertOpenAiMessagesToPiContext({
+  const piContext = buildStreamContext({
     messages: body.messages,
     tools: body.tools,
     sessionId,

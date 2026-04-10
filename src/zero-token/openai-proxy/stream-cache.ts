@@ -1,16 +1,54 @@
 /**
- * StreamFn Cache
+ * StreamFn Cache — RAW (no middleware)
  *
  * Caches StreamFn instances per provider so that:
  * 1. The underlying web client (e.g. DeepSeekWebClient) is created once and reused
  * 2. Module-level session maps (sessionMap, parentMessageMap) in each stream
  *    implementation are preserved across requests, enabling multi-turn conversations.
  *
- * Cache entries are invalidated when credentials change (detected via credential string comparison).
+ * IMPORTANT: Uses raw stream factories directly, bypassing the
+ * `wrapWithToolCalling` middleware that strips context down to the last user
+ * message. The proxy needs full context passthrough — the caller (e.g. Cursor)
+ * manages its own conversation history.
+ *
+ * Cache entries are invalidated when credentials change.
  */
 import type { StreamFn } from "@mariozechner/pi-agent-core";
-import { getWebStreamFactory } from "../streams/web-stream-factories.js";
+import { createChatGPTWebStreamFn } from "../streams/chatgpt-web-stream.js";
+import { createClaudeWebStreamFn } from "../streams/claude-web-stream.js";
+import { createDeepseekWebStreamFn } from "../streams/deepseek-web-stream.js";
+import { createDoubaoWebStreamFn } from "../streams/doubao-web-stream.js";
+import { createGeminiWebStreamFn } from "../streams/gemini-web-stream.js";
+import { createGlmIntlWebStreamFn } from "../streams/glm-intl-web-stream.js";
+import { createGlmWebStreamFn } from "../streams/glm-web-stream.js";
+import { createGrokWebStreamFn } from "../streams/grok-web-stream.js";
+import { createKimiWebStreamFn } from "../streams/kimi-web-stream.js";
+import { createPerplexityWebStreamFn } from "../streams/perplexity-web-stream.js";
+import { createQwenCNWebStreamFn } from "../streams/qwen-cn-web-stream.js";
+import { createQwenWebStreamFn } from "../streams/qwen-web-stream.js";
+import { createXiaomiMimoWebStreamFn } from "../streams/xiaomimo-web-stream.js";
 import { resolveCredentialForProvider } from "./credential-resolver.js";
+
+/** Raw factories — NO middleware wrapper. */
+const RAW_FACTORIES: Record<string, (cookie: string) => StreamFn> = {
+  "deepseek-web": createDeepseekWebStreamFn,
+  "claude-web": createClaudeWebStreamFn,
+  "doubao-web": createDoubaoWebStreamFn,
+  "chatgpt-web": createChatGPTWebStreamFn,
+  "qwen-web": createQwenWebStreamFn,
+  "qwen-cn-web": createQwenCNWebStreamFn,
+  "kimi-web": createKimiWebStreamFn,
+  "gemini-web": createGeminiWebStreamFn,
+  "grok-web": createGrokWebStreamFn,
+  "glm-web": createGlmWebStreamFn,
+  "glm-intl-web": createGlmIntlWebStreamFn,
+  "perplexity-web": createPerplexityWebStreamFn,
+  "xiaomimo-web": createXiaomiMimoWebStreamFn,
+};
+
+export function listRawApiIds(): string[] {
+  return Object.keys(RAW_FACTORIES);
+}
 
 interface CachedStream {
   streamFn: StreamFn;
@@ -27,7 +65,7 @@ const cache = new Map<string, CachedStream>();
 export function getCachedStreamFn(
   provider: string,
 ): { streamFn: StreamFn; credential: string } | undefined {
-  const factory = getWebStreamFactory(provider);
+  const factory = RAW_FACTORIES[provider];
   if (!factory) {
     return undefined;
   }

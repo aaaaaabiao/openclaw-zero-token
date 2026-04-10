@@ -5,8 +5,8 @@
  * and valid credentials).
  */
 import type { ServerResponse } from "node:http";
-import { listWebStreamApiIds } from "../streams/web-stream-factories.js";
 import { resolveCredentialForProvider } from "./credential-resolver.js";
+import { listRawApiIds } from "./stream-cache.js";
 import { sendJson } from "./stream-converter.js";
 
 // Hardcoded model catalog — matches web-providers.ts definitions
@@ -65,7 +65,7 @@ const MODEL_CATALOG: Record<string, Array<{ id: string; name: string; context_wi
 };
 
 export function handleListModels(res: ServerResponse): void {
-  const apiIds = listWebStreamApiIds();
+  const apiIds = listRawApiIds();
   // const availableProviders = new Set(listAvailableProviders());
   const now = Math.floor(Date.now() / 1000);
 
